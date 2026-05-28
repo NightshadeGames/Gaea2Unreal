@@ -800,6 +800,15 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 	/// Heightmap Import/Data Creation
 
 	ELandscapeImportResult ImportResult = FLandscapeImportHelper::GetHeightmapImportDescriptor(Settings->HeightMapFileName, bSingleFile, Settings->FlipYAxis, OutImportDescriptor, OutMessage);
+	if (ImportResult != ELandscapeImportResult::Success || OutImportDescriptor.FileResolutions.IsEmpty())
+	{
+		UE_LOG(GaeaSubsystem, Error, TEXT("Failed to get Heightmap Import Descriptor: %s"), *OutMessage.ToString());
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, FString::Printf(TEXT("Failed to get Heightmap Import Descriptor: %s"), *OutMessage.ToString()));
+		}
+		return;
+	}
 	int32 DescriptorIndex = OutImportDescriptor.FileResolutions.Num() / 2;
 	
 	ULandscapeEditorObject* DefaultValueObject = ULandscapeEditorObject::StaticClass()->GetDefaultObject<ULandscapeEditorObject>(); // Create Landscape Editor Object instance
