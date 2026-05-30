@@ -1,10 +1,10 @@
-﻿#include "GaeaUEToolsEditor.h"
+#include "GaeaUEToolsEditor.h"
 #include "GaeaEditorStyle.h"
 #include "EditorStyleSet.h"
 #include "GaeaCommands.h"
 #include "LevelEditor.h"
 #include "Misc/CoreDelegates.h"
-#include "Subsystems/EditorActorSubsystem.h"
+#include "Engine/Selection.h"
 #include "GaeaLandscapeComponent.h"
 #include "Landscape.h"
 
@@ -101,13 +101,10 @@ void FGaeaUEToolsEditorModule::RegisterImporterWindow()
 	FToolMenuOwnerScoped OwnerScoped(this);
 
 	//Set our menu entry name
-	constexpr TCHAR ParentMenuName[] = TEXT("LevelEditor.LevelEditorToolBar.User");
+	constexpr TCHAR ParentMenuName[] = TEXT("LevelEditor.LevelEditorToolBar");
 	UToolMenu* GaeaToolBar = UToolMenus::Get()->ExtendMenu(ParentMenuName);
-	GaeaToolBar->StyleName = TEXT("GaeaToolbar");
-
 	//Find the section of the editor menu we want to add to
-	//FToolMenuSection& Section = GaeaToolBar->FindOrAddSection("User");
-	FToolMenuSection& Section = GaeaToolBar->AddSection(TEXT("Gaea Landscape Importer"), LOCTEXT("GaeaLandscapeImporter_Label", "GaeaImporterTools"));
+	FToolMenuSection& Section = GaeaToolBar->FindOrAddSection("Settings");
 	
 	//Create and define our UI action
 	FToolUIAction OpenGaeaImporter;
@@ -120,19 +117,9 @@ void FGaeaUEToolsEditorModule::RegisterImporterWindow()
 	}
 	);
 	
-	//Create our custom toolbar entry - OLD. Does not work with editor shortcut key.
-	/*const FToolMenuEntry OpenGaeaLandscapeImporter = FToolMenuEntry::InitToolBarButton(
-	   TEXT("OpenGaeaLandscapeImporter"),
-	   OpenGaeaImporter,
-	   LOCTEXT("OpenGaeaLandscapeImporter_Label", "Gaea Landscape Importer"),
-	   LOCTEXT("OpenGaeaLandscapeImporter_Label_Description", "Opens Gaea Landscape Importer"),
-	   //FSlateIcon(FAppStyle::Get().GetStyleSetName(), TEXT("ClassIcon.LandscapeComponent")));
-	   FSlateIcon(FGaeaEditorStyle::GetStyleSetName(), TEXT("ImporterIcon"))
-	   );*/
-
 	const FToolMenuEntry OpenGaeaLandscapeImporter = FToolMenuEntry::InitToolBarButton(
 	FGaeaCommands::Get().OpenImporter,
-	LOCTEXT("OpenGaeaLandscapeImporter_Label", "Gaea Landscape Importer"),
+	LOCTEXT("OpenGaeaLandscapeImporter_Label", "Gaea"),
 	LOCTEXT("OpenGaeaLandscapeImporter_Label_Description", "Opens Gaea Landscape Importer"),
 	   FSlateIcon(FGaeaEditorStyle::GetStyleSetName(), TEXT("ImporterIcon"))
 	   );
@@ -152,10 +139,11 @@ void FGaeaUEToolsEditorModule::RegisterGaeaActorMenu()
 	Menu->AddDynamicSection("GaeaOptions", FNewToolMenuDelegate::CreateLambda([this](UToolMenu* InMenu)
 {
 	// This delegate is called when it is time to create the menu section
-	UEditorActorSubsystem* ActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
-	if (ActorSubsystem)
+	USelection* SelectedActorsPtr = GEditor->GetSelectedActors();
+	TArray<AActor*> SelectedActors;
+	SelectedActorsPtr->GetSelectedObjects<AActor>(SelectedActors);
+	if (SelectedActors.Num() > 0)
 	{
-		const TArray<AActor*>& SelectedActors = ActorSubsystem->GetSelectedLevelActors();
 		if (SelectedActors.Num() > 0)
 		{
 			AActor* Actor = SelectedActors[0];
@@ -193,7 +181,7 @@ void FGaeaUEToolsEditorModule::RefreshGaeaLandscape(FMenuBuilder& MenuBuilder)
 			UWorld* World = GEditor->GetEditorWorldContext().World();
 	if (World)
 	{
-		if (World->IsPartitionedWorld())
+		if (false)
 		{
 			Manager->ReimportGaeaWPTerrain(); // Reimport for World Partition
 		}

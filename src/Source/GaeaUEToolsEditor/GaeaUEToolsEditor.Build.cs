@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using UnrealBuildTool;
 
 public class GaeaUEToolsEditor : ModuleRules
@@ -35,14 +35,13 @@ public class GaeaUEToolsEditor : ModuleRules
                 "MaterialEditor", 
                 "Landscape", 
                 "UnrealEd", 
-                "ToolMenus", 
-                "EditorFramework",
+                "ToolMenus",
                 "EditorSubsystem", 
                 "LandscapeEditor",
                 "Foliage",
                 "Json",
                 "JsonUtilities",
-                "AssetRegistry", "EditorScriptingUtilities"
+                "AssetRegistry", "EditorScriptingUtilities", "DesktopPlatform", "LandscapeEditorUtilities"
             }
         );
     }

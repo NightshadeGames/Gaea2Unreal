@@ -51,7 +51,7 @@ public:
 
 	//Must be set to automatically setup layer weightmaps.
 	UPROPERTY(Category="Rendering", EditAnywhere, DisplayName="Landscape Material")
-	TObjectPtr<UMaterialInterface> LandscapeMaterial;
+	UMaterialInterface* LandscapeMaterial;
 
 	UPROPERTY(Category="Rendering", VisibleAnywhere, DisplayName="Landscape Layer Names", meta = (EditCondition = "IsLandscapeMaterialLayerNamesNotEmpty()"))
 	TArray<FName> LandscapeMaterialLayerNames;

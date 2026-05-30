@@ -26,14 +26,11 @@ void FGaeaEditorStyle::Initialize()
 	// Construct the relative path to the image file
 	const FString IconPath = ContentDir + "/Icons/ImporterIcon.png";*/
 	
-	FString PluginPath = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("GaeaUnrealTools"));
-	if (!FPaths::DirectoryExists(PluginPath))
-		PluginPath = FPaths::Combine(FPaths::EnginePluginsDir(), TEXT("GaeaUnrealTools"));
-
-	if (FPaths::DirectoryExists(PluginPath))
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("GaeaUnrealTools"));
+	if (Plugin.IsValid())
 	{
 		// Plugin found, construct the resources path
-		const FString ResourcesPath = FPaths::Combine(PluginPath, TEXT("Resources"));
+		const FString ResourcesPath = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"));
 		UE_LOG(LogTemp, Warning, TEXT("Resources Directory is: %s"), *ResourcesPath);
 
 		// Construct the relative path to the image file
@@ -43,7 +40,7 @@ void FGaeaEditorStyle::Initialize()
 	else
 	{
 		// Plugin not found
-		UE_LOG(LogTemp, Error, TEXT("GaeaUnrealTools icon path not found. This is likely caused by the plugin being installed in an incorrect location or folder name. Please see https://gaea.app/uedocs for exact instructions for the file path."));
+		UE_LOG(LogTemp, Error, TEXT("GaeaUnrealTools plugin could not be found via IPluginManager."));
 	}	
 	
  

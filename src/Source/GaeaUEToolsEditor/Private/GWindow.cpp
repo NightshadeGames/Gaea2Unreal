@@ -3,7 +3,7 @@
 
 #include "GWindow.h"
 #include "GaeaSubsystem.h"
-#include "WorldPartition/WorldPartitionSubsystem.h"
+
 
 SMCWindow::SMCWindow()
 {

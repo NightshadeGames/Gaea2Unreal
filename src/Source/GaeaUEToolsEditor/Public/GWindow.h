@@ -21,7 +21,7 @@ public:
 	SLATE_BEGIN_ARGS(SMCWindow)
 	{
 		Title(FText::GetEmpty());
-		ClientSize(FVector2d(800,600));
+		ClientSize(FVector2D(800,600));
 		SizingRule(ESizingRule::UserSized);
 	}
 
@@ -45,7 +45,7 @@ public:
 	SLATE_BEGIN_ARGS(SGaeaImportWindow)
 	{
 		Title(FText::GetEmpty());
-		ClientSize(FVector2d(800,600));
+		ClientSize(FVector2D(800,600));
 		SizingRule(ESizingRule::UserSized);
 	}
 

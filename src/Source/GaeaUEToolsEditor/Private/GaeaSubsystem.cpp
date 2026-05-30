@@ -14,22 +14,23 @@
 #include "Widgets/Input/SButton.h"
 #include "Landscape.h"
 #include "LandscapeProxy.h"
-#include "LandscapeRegionUtils.h"
+
 #include "LandscapeStreamingProxy.h"
 #include "Serialization/JsonSerializer.h"
 #include "JsonObjectConverter.h"
 #include "LandscapeEditorUtils.h"
 #include "LandscapeSubsystem.h"
-#include "LocationVolume.h"
+#include "LandscapeDataAccess.h"
+
 #include "ActorFactories/ActorFactory.h"
 #include "ToolMenus.h"
 #include "Builders/CubeBuilder.h"
-#include "Subsystems/EditorActorSubsystem.h"
+#include "Engine/Selection.h"
 #include "VT/VirtualTexture.h"
 #include "GaeaLandscapeComponent.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
-#include "AsyncTreeDifferences.h"
+
 #include "EditorAssetLibrary.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/PackageName.h"
@@ -40,6 +41,144 @@
 
 #include "Materials/MaterialExpressionLandscapeLayerBlend.h"
 
+// --- START UE4 SHIM FOR FLandscapeImportHelper ---
+#include "LandscapeEditorModule.h"
+#include "LandscapeFileFormatInterface.h"
+#include "NewLandscapeUtils.h"
+#include "LandscapeEditorObject.h"
+
+struct FLandscapeImportResolution
+{
+	uint32 Width;
+	uint32 Height;
+	FLandscapeImportResolution() : Width(0), Height(0) {}
+	FLandscapeImportResolution(uint32 InWidth, uint32 InHeight) : Width(InWidth), Height(InHeight) {}
+};
+
+enum class ELandscapeImportTransformType
+{
+	None,
+	ExpandCentered,
+	Resample
+};
+
+struct FLandscapeImportDescriptor
+{
+	TArray<FLandscapeImportResolution> FileResolutions;
+	TArray<FLandscapeImportResolution> ImportResolutions;
+	FVector Scale;
+    FString FilePath;
+};
+
+class FLandscapeImportHelper
+{
+public:
+	static ELandscapeImportResult GetHeightmapImportDescriptor(const FString& FilePath, bool bSingleFile, bool bFlipY, FLandscapeImportDescriptor& OutDescriptor, FText& OutMessage)
+	{
+		ILandscapeEditorModule& LandscapeEditorModule = FModuleManager::GetModuleChecked<ILandscapeEditorModule>("LandscapeEditor");
+		const ILandscapeHeightmapFileFormat* Format = LandscapeEditorModule.GetHeightmapFormatByExtension(*FPaths::GetExtension(FilePath, true));
+		if (!Format) { OutMessage = FText::FromString("Format not supported"); return ELandscapeImportResult::Error; }
+		FLandscapeHeightmapInfo Info = Format->Validate(*FilePath);
+        OutDescriptor.FilePath = FilePath;
+        for (const FLandscapeFileResolution& Res : Info.PossibleResolutions) {
+            OutDescriptor.FileResolutions.Add(FLandscapeImportResolution(Res.Width, Res.Height));
+            OutDescriptor.ImportResolutions.Add(FLandscapeImportResolution(Res.Width, Res.Height));
+        }
+		return Info.ResultCode;
+	}
+
+	static ELandscapeImportResult GetWeightmapImportDescriptor(const FString& FilePath, bool bSingleFile, bool bFlipY, FName LayerName, FLandscapeImportDescriptor& OutDescriptor, FText& OutMessage)
+	{
+		ILandscapeEditorModule& LandscapeEditorModule = FModuleManager::GetModuleChecked<ILandscapeEditorModule>("LandscapeEditor");
+		const ILandscapeWeightmapFileFormat* Format = LandscapeEditorModule.GetWeightmapFormatByExtension(*FPaths::GetExtension(FilePath, true));
+		if (!Format) { OutMessage = FText::FromString("Format not supported"); return ELandscapeImportResult::Error; }
+		FLandscapeWeightmapInfo Info = Format->Validate(*FilePath, LayerName);
+        OutDescriptor.FilePath = FilePath;
+        for (const FLandscapeFileResolution& Res : Info.PossibleResolutions) {
+            OutDescriptor.FileResolutions.Add(FLandscapeImportResolution(Res.Width, Res.Height));
+            OutDescriptor.ImportResolutions.Add(FLandscapeImportResolution(Res.Width, Res.Height));
+        }
+		return Info.ResultCode;
+	}
+
+	static void ChooseBestComponentSizeForImport(int32 Width, int32 Height, int32& OutQuadsPerSection, int32& OutSectionsPerComponent, FIntPoint& OutComponentCount)
+	{
+        ULandscapeEditorObject* Settings = ULandscapeEditorObject::StaticClass()->GetDefaultObject<ULandscapeEditorObject>();
+		Settings->ImportLandscape_Width = Width;
+		Settings->ImportLandscape_Height = Height;
+		FNewLandscapeUtils::ChooseBestComponentSizeForImport(Settings);
+		OutQuadsPerSection = Settings->NewLandscape_QuadsPerSection;
+		OutSectionsPerComponent = Settings->NewLandscape_SectionsPerComponent;
+		OutComponentCount = Settings->NewLandscape_ComponentCount;
+	}
+
+	static ELandscapeImportResult GetHeightmapImportData(const FLandscapeImportDescriptor& Descriptor, int32 ResolutionIndex, TArray<uint16>& OutData, FText& OutMessage)
+	{
+		ILandscapeEditorModule& LandscapeEditorModule = FModuleManager::GetModuleChecked<ILandscapeEditorModule>("LandscapeEditor");
+		const ILandscapeHeightmapFileFormat* Format = LandscapeEditorModule.GetHeightmapFormatByExtension(*FPaths::GetExtension(Descriptor.FilePath, true));
+		if (!Format) return ELandscapeImportResult::Error;
+        FLandscapeFileResolution Res;
+        Res.Width = Descriptor.ImportResolutions[ResolutionIndex].Width;
+        Res.Height = Descriptor.ImportResolutions[ResolutionIndex].Height;
+		FLandscapeHeightmapImportData ImportData = Format->Import(*Descriptor.FilePath, Res);
+		OutData = MoveTemp(ImportData.Data);
+		OutMessage = ImportData.ErrorMessage;
+		return ImportData.ResultCode;
+	}
+
+	static ELandscapeImportResult GetWeightmapImportData(const FLandscapeImportDescriptor& Descriptor, int32 ResolutionIndex, FName LayerName, TArray<uint8>& OutData, FText& OutMessage)
+	{
+		ILandscapeEditorModule& LandscapeEditorModule = FModuleManager::GetModuleChecked<ILandscapeEditorModule>("LandscapeEditor");
+		const ILandscapeWeightmapFileFormat* Format = LandscapeEditorModule.GetWeightmapFormatByExtension(*FPaths::GetExtension(Descriptor.FilePath, true));
+		if (!Format) return ELandscapeImportResult::Error;
+        FLandscapeFileResolution Res;
+        Res.Width = Descriptor.ImportResolutions[ResolutionIndex].Width;
+        Res.Height = Descriptor.ImportResolutions[ResolutionIndex].Height;
+		FLandscapeWeightmapImportData ImportData = Format->Import(*Descriptor.FilePath, LayerName, Res);
+		OutData = MoveTemp(ImportData.Data);
+		OutMessage = ImportData.ErrorMessage;
+		return ImportData.ResultCode;
+	}
+
+	static void TransformHeightmapImportData(const TArray<uint16>& InData, TArray<uint16>& OutData, FLandscapeImportResolution InRes, FLandscapeImportResolution OutRes, ELandscapeImportTransformType TransformType)
+	{
+		OutData.SetNumUninitialized(OutRes.Width * OutRes.Height);
+		int32 OffsetX = (OutRes.Width - InRes.Width) / 2;
+		int32 OffsetY = (OutRes.Height - InRes.Height) / 2;
+		for (uint32 Y = 0; Y < OutRes.Height; ++Y)
+		{
+			for (uint32 X = 0; X < OutRes.Width; ++X)
+			{
+				int32 SrcX = X - OffsetX;
+				int32 SrcY = Y - OffsetY;
+				if (SrcX >= 0 && SrcX < (int32)InRes.Width && SrcY >= 0 && SrcY < (int32)InRes.Height)
+					OutData[Y * OutRes.Width + X] = InData[SrcY * InRes.Width + SrcX];
+				else
+					OutData[Y * OutRes.Width + X] = 32768;
+			}
+		}
+	}
+
+	static void TransformWeightmapImportData(const TArray<uint8>& InData, TArray<uint8>& OutData, FLandscapeImportResolution InRes, FLandscapeImportResolution OutRes, ELandscapeImportTransformType TransformType)
+	{
+		OutData.SetNumUninitialized(OutRes.Width * OutRes.Height);
+		int32 OffsetX = (OutRes.Width - InRes.Width) / 2;
+		int32 OffsetY = (OutRes.Height - InRes.Height) / 2;
+		for (uint32 Y = 0; Y < OutRes.Height; ++Y)
+		{
+			for (uint32 X = 0; X < OutRes.Width; ++X)
+			{
+				int32 SrcX = X - OffsetX;
+				int32 SrcY = Y - OffsetY;
+				if (SrcX >= 0 && SrcX < (int32)InRes.Width && SrcY >= 0 && SrcY < (int32)InRes.Height)
+					OutData[Y * OutRes.Width + X] = InData[SrcY * InRes.Width + SrcX];
+				else
+					OutData[Y * OutRes.Width + X] = 0;
+			}
+		}
+	}
+};
+// --- END UE4 SHIM ---
 
 DEFINE_LOG_CATEGORY_STATIC(LogGaeaSubsystem, Log, All);
 
@@ -150,10 +289,11 @@ void UGaeaSubsystem::ReimportGaeaTerrain()
 	TArray<uint8> WeightOutData;
 	TArray<uint8> FinalWeightOutData;
 	
-	UEditorActorSubsystem* ActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>(); // Get an instance of the Editor Actor Subsystem.
-	if (ActorSubsystem)
+	USelection* SelectedActorsPtr = GEditor->GetSelectedActors();
+	TArray<AActor*> SelectedActors;
+	SelectedActorsPtr->GetSelectedObjects<AActor>(SelectedActors);
+	if (SelectedActors.Num() > 0)
 	{
-		const TArray<AActor*>& SelectedActors = ActorSubsystem->GetSelectedLevelActors(); // Use the subsystem instance to get references to selected actors.
 		UGaeaLandscapeComponent* GaeaComponent = SelectedActors[0]->FindComponentByClass<UGaeaLandscapeComponent>(); // Check for a Gaea Landscape Component.
 		if (SelectedActors.Num() > 0 && GaeaComponent) // Check if component is valid and we actually have a selected actor.
 		{
@@ -222,13 +362,13 @@ void UGaeaSubsystem::ReimportGaeaTerrain()
 				{
 					FLandscapeLayer* BaseLayer = Landscape->GetLayer(0);
 					FGuid ID = BaseLayer->Guid;
-					LandscapeEdit.SetEditLayer(ID);
+					//LandscapeEdit.SetEditLayer(ID);
 				}
 				
 				/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 				/// Weightmap Data Setup and SetAlphaData Execution
 				
-				if (LandscapeActorInfo && !GaeaComponent->WeightmapFilepaths.IsEmpty())
+				if (LandscapeActorInfo && !GaeaComponent->WeightmapFilepaths.Num() == 0)
 				{
 					
 					// Loop through all layers associated with the landscape and get the relevant layer objects.
@@ -347,10 +487,11 @@ void UGaeaSubsystem::ReimportGaeaWPTerrain()
 	TArray<uint8> WeightOutData;
 	TArray<uint8> FinalWeightOutData;
 	
-	UEditorActorSubsystem* ActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>(); // Get an instance of the Editor Actor Subsystem.
-	if (ActorSubsystem)
+	USelection* SelectedActorsPtr = GEditor->GetSelectedActors();
+	TArray<AActor*> SelectedActors;
+	SelectedActorsPtr->GetSelectedObjects<AActor>(SelectedActors);
+	if (SelectedActors.Num() > 0)
 	{
-		const TArray<AActor*>& SelectedActors = ActorSubsystem->GetSelectedLevelActors();
 		if (SelectedActors.Num() > 0)
 		{
 			AActor* Actor = SelectedActors[0];
@@ -424,7 +565,7 @@ void UGaeaSubsystem::ReimportGaeaWPTerrain()
 									ELandscapeImportTransformType::ExpandCentered
 								);
                             	
-								if (LandscapeActorInfo && !GaeaComponent->WeightmapFilepaths.IsEmpty())
+								if (LandscapeActorInfo && !GaeaComponent->WeightmapFilepaths.Num() == 0)
 								{
 									// Loop through all layers associated with the landscape and get the relevant layer objects.
 									for (const FLandscapeInfoLayerSettings& LayerSettings : LandscapeActorInfo->Layers)
@@ -452,7 +593,7 @@ void UGaeaSubsystem::ReimportGaeaWPTerrain()
 
 								// Collect and process each landscape proxy
 								TArray<ALandscapeProxy*> AllProxies;
-								Landscape->GetLandscapeInfo()->ForEachLandscapeProxy([&AllProxies](ALandscapeProxy* Proxy)
+								Landscape->GetLandscapeInfo()->ForAllLandscapeProxies([&AllProxies](ALandscapeProxy* Proxy)
 								{
 									AllProxies.Add(Proxy);
 									return true; // Continue iteration
@@ -460,6 +601,12 @@ void UGaeaSubsystem::ReimportGaeaWPTerrain()
 
 								for (ALandscapeProxy* Proxy : AllProxies)
 								{
+									TOptional<FScopedSetLandscapeEditingLayer> ScopedLayer;
+									if(Landscape->bCanHaveLayersContent)
+									{
+										FLandscapeLayer* BaseLayer = Landscape->GetLayer(0);
+										ScopedLayer.Emplace(Landscape, BaseLayer->Guid);
+									}
 									FLandscapeEditDataInterface LandscapeEdit(Proxy->GetLandscapeInfo());
 
 									FIntRect ComponentsRect = Proxy->GetBoundingRect() + Proxy->LandscapeSectionOffset;
@@ -494,7 +641,7 @@ void UGaeaSubsystem::ReimportGaeaWPTerrain()
 										{
 											FLandscapeLayer* BaseLayer = Landscape->GetLayer(0);
 											FGuid ID = BaseLayer->Guid;
-											LandscapeEdit.SetEditLayer(ID);
+											//LandscapeEdit.SetEditLayer(ID);
 
 											LandscapeEdit.SetHeightData(
 												ComponentsRect.Min.X, ComponentsRect.Min.Y,
@@ -572,7 +719,7 @@ void UGaeaSubsystem::ReimportGaeaWPTerrain()
 													{
 														FLandscapeLayer* BaseLayer = Landscape->GetLayer(0);
 														FGuid ID = BaseLayer->Guid;
-														LandscapeEdit.SetEditLayer(ID);
+														//LandscapeEdit.SetEditLayer(ID);
 
 														LandscapeEdit.SetAlphaData(
 															InfoObjects[i], 
@@ -668,7 +815,7 @@ void UGaeaSubsystem::ImportHeightmap(FString& Heightmap, FString& JSON, FVector&
 		
 		FileManager.FindFiles(FilesInDirectory, *(OutPath / TEXT("*.json*")), true, false); // Get all instances of json files from directory.
 		
-		if (FilesInDirectory.IsEmpty()) // Early exit if json isn't present.
+		if (FilesInDirectory.Num() == 0) // Early exit if json isn't present.
 		{
 			JSON = TEXT("None");
 			UE_LOG(LogTemp, Log, TEXT("No json files found."));
@@ -830,7 +977,7 @@ void UGaeaSubsystem::AddComponents(ULandscapeInfo* InLandscapeInfo, ULandscapeSu
 		// Add New component...
 		FIntPoint ComponentBase = ComponentCoordinate * InLandscapeInfo->ComponentSizeQuads;
 
-		ALandscapeProxy* LandscapeProxy = InLandscapeSubsystem->FindOrAddLandscapeProxy(InLandscapeInfo, ComponentBase);
+		ALandscapeProxy* LandscapeProxy = InLandscapeInfo->LandscapeActor.Get();
 		if (!LandscapeProxy)
 		{
 			continue;
@@ -849,7 +996,7 @@ void UGaeaSubsystem::AddComponents(ULandscapeInfo* InLandscapeInfo, ULandscapeSu
 
 		TArray<FColor> HeightData;
 		const int32 ComponentVerts = (LandscapeComponent->SubsectionSizeQuads + 1) * LandscapeComponent->NumSubsections;
-		const FColor PackedMidpoint = LandscapeDataAccess::PackHeight(LandscapeDataAccess::GetTexHeight(0.0f));
+		const FColor PackedMidpoint = FColor(128, 0, 0, 255);
 		HeightData.Init(PackedMidpoint, FMath::Square(ComponentVerts));
 
 		LandscapeComponent->InitHeightmapData(HeightData, true);
@@ -892,7 +1039,7 @@ void UGaeaSubsystem::AddComponents(ULandscapeInfo* InLandscapeInfo, ULandscapeSu
 
 		if (!bHasLandscapeLayersContent)
 		{
-			ULandscapeHeightfieldCollisionComponent* CollisionComp = NewComponent->GetCollisionComponent();
+			ULandscapeHeightfieldCollisionComponent* CollisionComp = NewComponent->CollisionComponent.Get();
 			if (CollisionComp && !bHasXYOffset)
 			{
 				CollisionComp->MarkRenderStateDirty();
@@ -930,7 +1077,7 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 	}
 	
 	ULandscapeSubsystem* LandscapeSubsystem = World->GetSubsystem<ULandscapeSubsystem>();
-	bool bIsGridBased = LandscapeSubsystem->IsGridBased();
+	bool bIsGridBased = false;
 	
 	
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -977,7 +1124,7 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 	UE_LOG(LogTemp, Display, TEXT("LandscapeMaterialLayerNames Count: %d"), Settings->LandscapeMaterialLayerNames.Num());
 	UE_LOG(LogTemp, Display, TEXT("LayerInfoFolder Path: %s"), *Settings->LayerInfoFolder.Path);
 
-	if (!Settings->LandscapeMaterialLayerNames.IsEmpty() && PathExists && Settings->LandscapeMaterialLayerNames.Num() >= 2 && Settings->WeightmapFileNames.Num() == (Settings->LandscapeMaterialLayerNames.Num() - 1))
+	if (Settings->LandscapeMaterialLayerNames.Num() > 0 && PathExists && Settings->LandscapeMaterialLayerNames.Num() >= 2 && Settings->WeightmapFileNames.Num() == (Settings->LandscapeMaterialLayerNames.Num() - 1))
 	{
 		ImportWeightmaps = true;
 	}
@@ -1027,7 +1174,7 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 		WeightOutMessage.AddDefaulted(Settings->LandscapeMaterialLayerNames.Num());
 		WeightImportResults.AddDefaulted(Settings->LandscapeMaterialLayerNames.Num());
 
-		if(Settings->WeightmapFilePaths.IsEmpty()) // If the user hasn't touched the File Names order, we create the full file paths now.
+		if(Settings->WeightmapFilePaths.Num() == 0) // If the user hasn't touched the File Names order, we create the full file paths now.
 		{
 			for(int i = 0; i < Settings->WeightmapFileNames.Num(); i++) 
 			{
@@ -1087,7 +1234,7 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 		GaeaComponent->DefinitionFilepath.FilePath = Settings->jsonFileName;
 
 		// Set the weightmap file paths to the file path array on the component
-		if (!Settings->WeightmapFilePaths.IsEmpty())
+		if (!Settings->WeightmapFilePaths.Num() == 0)
 		{
 			GaeaComponent->WeightmapFilepaths.SetNum(Settings->WeightmapFilePaths.Num());
 			
@@ -1106,7 +1253,7 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 	HeightmapDataPerLayers.Add(FGuid(), MoveTemp(FinalHeightData));
 	TMap<FGuid, TArray<FLandscapeImportLayerInfo>> MaterialLayerDataPerLayers;
 
-	if(Settings->LandscapeMaterialLayerNames.IsEmpty() || !PathExists || Settings->LandscapeMaterialLayerNames.Num() < 2)
+	if(Settings->LandscapeMaterialLayerNames.Num() == 0 || !PathExists || Settings->LandscapeMaterialLayerNames.Num() < 2)
 	{
 		MaterialLayerDataPerLayers.Add(FGuid(), TArray<FLandscapeImportLayerInfo>());
 	}
@@ -1159,7 +1306,7 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 		FScopedSlowTask SlowTask(100.f, FText::FromString(TEXT("Creating landscape chunks, importing bits and bytes. Might be here for awhile.")));
 		SlowTask.MakeDialog(false);
 		SlowTask.EnterProgressFrame(10.f);
-		LandscapeSubsystem->ChangeGridSize(LandscapeInfo, Settings->WorldPartitionGridSize); // WP function call
+		//LandscapeSubsystem->ChangeGridSize(LandscapeInfo, Settings->WorldPartitionGridSize); // WP function call
 		SlowTask.EnterProgressFrame(90.f);
 	}
 	

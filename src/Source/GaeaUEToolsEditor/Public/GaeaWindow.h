@@ -19,7 +19,7 @@ public:
 	SLATE_BEGIN_ARGS(SGaeaWindow)
 	{
 		Title(FText::GetEmpty());
-		ClientSize(FVector2d(800,600));
+		ClientSize(FVector2D(800,600));
 		SizingRule(ESizingRule::FixedSize);
 	}
 
