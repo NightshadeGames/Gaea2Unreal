@@ -1112,7 +1112,6 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 	/// Weightmap Import/Data Creation
 
 	FString PackagePath = Settings->LayerInfoFolder.Path;
-	FString Name;
 	bool PathExists = false;
 
 	if(!PackagePath.IsEmpty())
@@ -1124,40 +1123,84 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 	UE_LOG(LogTemp, Display, TEXT("LandscapeMaterialLayerNames Count: %d"), Settings->LandscapeMaterialLayerNames.Num());
 	UE_LOG(LogTemp, Display, TEXT("LayerInfoFolder Path: %s"), *Settings->LayerInfoFolder.Path);
 
-	if (Settings->LandscapeMaterialLayerNames.Num() > 0 && PathExists && Settings->LandscapeMaterialLayerNames.Num() >= 2 && Settings->WeightmapFileNames.Num() == (Settings->LandscapeMaterialLayerNames.Num() - 1))
+	// The material's landscape layers are created and assigned whenever the material defines them.
+	// Weightmap files are optional: a Gaea build can export a heightmap only, in which case every
+	// layer is still created and assigned (unpainted) so the terrain renders with the base layer
+	// instead of falling back to the material's default.
+	const bool bWeightmapCountMatches = Settings->WeightmapFileNames.Num() == (Settings->LandscapeMaterialLayerNames.Num() - 1);
+
+	if (Settings->LandscapeMaterialLayerNames.Num() > 0 && PathExists)
 	{
 		ImportWeightmaps = true;
 	}
 
 	if(ImportWeightmaps)
 	{
-		//Create LandscapeLayerInfoObjects for use with weightmaps.
+		if (!bWeightmapCountMatches)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Found %d weightmap files for %d material layers. The layers will still be created and assigned, but left unpainted."),
+				Settings->WeightmapFileNames.Num(), Settings->LandscapeMaterialLayerNames.Num());
+		}
+
+		//Load or create the LandscapeLayerInfoObjects for the material's layers.
 		for(int i = 0; i < Settings->LandscapeMaterialLayerNames.Num(); i++)
 		{
-			Name = Settings->LandscapeMaterialLayerNames[i].ToString();
-			Name = Name.Replace(TEXT(" "), TEXT("")); // Remove whitespaces from Name
-			FString NewAssetName;
-			FString DummyPackageName;
-			AssetToolsModule.Get().CreateUniqueAssetName(PackagePath / Name, TEXT(""), DummyPackageName, NewAssetName);
-			UObject* CreatedAsset = AssetToolsModule.Get().CreateAsset(NewAssetName, PackagePath, ULandscapeLayerInfoObject::StaticClass(), nullptr);
+			const FString LayerNameString = Settings->LandscapeMaterialLayerNames[i].ToString();
+			const FString AssetName = LayerNameString.Replace(TEXT(" "), TEXT("")) + TEXT("_LayerInfo"); // Remove whitespaces, then suffix
+			const FString PackageName = FPaths::Combine(PackagePath, AssetName);
 
-			ULandscapeLayerInfoObject* LayerInfoObj = Cast<ULandscapeLayerInfoObject>(CreatedAsset);
-
-			if(LayerInfoObj)
+			//Reuse an existing layer info object when one with a matching layer name is already in
+			//the target folder, so repeated imports don't pile up duplicates like LayerName_1.
+			ULandscapeLayerInfoObject* LayerInfoObj = nullptr;
+			if (UEditorAssetLibrary::DoesAssetExist(PackageName))
 			{
-				LayerInfoObj->LayerName = Settings->LandscapeMaterialLayerNames[i];
+				if (ULandscapeLayerInfoObject* Existing = Cast<ULandscapeLayerInfoObject>(UEditorAssetLibrary::LoadAsset(PackageName)))
+				{
+					if (Existing->LayerName == Settings->LandscapeMaterialLayerNames[i])
+					{
+						LayerInfoObj = Existing;
+						UE_LOG(LogTemp, Log, TEXT("Reusing existing layer info object '%s' for layer '%s'."), *PackageName, *LayerNameString);
+					}
+					else
+					{
+						UE_LOG(LogTemp, Log, TEXT("Asset '%s' exists but its LayerName is '%s', not '%s'. Creating a new layer info object for this layer."),
+							*PackageName, *Existing->LayerName.ToString(), *LayerNameString);
+					}
+				}
 			}
+
+			if (!LayerInfoObj)
+			{
+				FString NewAssetName;
+				FString DummyPackageName;
+				AssetToolsModule.Get().CreateUniqueAssetName(PackageName, TEXT(""), DummyPackageName, NewAssetName);
+				UObject* CreatedAsset = AssetToolsModule.Get().CreateAsset(NewAssetName, PackagePath, ULandscapeLayerInfoObject::StaticClass(), nullptr);
+				LayerInfoObj = Cast<ULandscapeLayerInfoObject>(CreatedAsset);
+
+				if (LayerInfoObj)
+				{
+					LayerInfoObj->LayerName = Settings->LandscapeMaterialLayerNames[i];
+					UE_LOG(LogTemp, Log, TEXT("Created layer info object '%s' with LayerName '%s'."),
+						*NewAssetName, *LayerNameString);
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("Failed to create a LandscapeLayerInfoObject for layer '%s' in '%s'."),
+						*LayerNameString, *PackagePath);
+				}
+			}
+
 			LayerInfoObjects.Add(LayerInfoObj);
 		}
 	
-	
-		//Set layer names
+		//Set layer names and attach the layer info objects. This happens for every layer, with or
+		//without weightmap data, so the landscape always gets the material's full layer list.
 		for(int i = 0; i < Settings->LandscapeMaterialLayerNames.Num(); i++)
 		{
 			FLandscapeImportLayerInfo LayerInfo;
 			LayerInfo.LayerName = Settings->LandscapeMaterialLayerNames[i];
+			LayerInfo.LayerInfo = LayerInfoObjects[i];
 			MaterialImportLayers.Add(LayerInfo);
-			MaterialImportLayers[i].LayerName = LayerInfo.LayerName;
 		}
 		
 		//Fill first Layer with data. Layer 1 should never have areas with no data, as that results in black spots in the final material render.
@@ -1174,34 +1217,35 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 		WeightOutMessage.AddDefaulted(Settings->LandscapeMaterialLayerNames.Num());
 		WeightImportResults.AddDefaulted(Settings->LandscapeMaterialLayerNames.Num());
 
-		if(Settings->WeightmapFilePaths.Num() == 0) // If the user hasn't touched the File Names order, we create the full file paths now.
+		if(bWeightmapCountMatches)
 		{
-			for(int i = 0; i < Settings->WeightmapFileNames.Num(); i++) 
+			if(Settings->WeightmapFilePaths.IsEmpty()) // If the user hasn't touched the File Names order, we create the full file paths now.
 			{
-				FString FullPath = FPaths::Combine(*Settings->StoredPath, *Settings->WeightmapFileNames[i]);
-				UE_LOG(LogTemp, Warning, TEXT("Weightmap Full Path: %s"), *FullPath);
-				Settings->WeightmapFilePaths.Add(FullPath); 
+				for(int i = 0; i < Settings->WeightmapFileNames.Num(); i++) 
+				{
+					FString FullPath = FPaths::Combine(*Settings->StoredPath, *Settings->WeightmapFileNames[i]);
+					UE_LOG(LogTemp, Warning, TEXT("Weightmap Full Path: %s"), *FullPath);
+					Settings->WeightmapFilePaths.Add(FullPath); 
+				}
 			}
-		}
 
-		// The first landscape layer is already filled, so the user should always be using 1 weightmap file less than the total amount of landscape layers. 
-		for(int32 i = 1; i < Settings->LandscapeMaterialLayerNames.Num(); i++)
-		{
-			int32 WeightmapIndex = i - 1; 
-			if (WeightmapIndex < Settings->WeightmapFilePaths.Num()) 
-			{ 
-				WeightImportResults[i] = FLandscapeImportHelper::GetWeightmapImportDescriptor(Settings->WeightmapFilePaths[WeightmapIndex], bSingleFile, Settings->FlipYAxis, Settings->LandscapeMaterialLayerNames[i], WeightOutImportDescriptors[i],WeightOutMessage[i]); 
+			// The first landscape layer is already filled, so the user should always be using 1 weightmap file less than the total amount of landscape layers. 
+			for(int32 i = 1; i < Settings->LandscapeMaterialLayerNames.Num(); i++)
+			{
+				int32 WeightmapIndex = i - 1; 
+				if (WeightmapIndex < Settings->WeightmapFilePaths.Num()) 
+				{ 
+					WeightImportResults[i] = FLandscapeImportHelper::GetWeightmapImportDescriptor(Settings->WeightmapFilePaths[WeightmapIndex], bSingleFile, Settings->FlipYAxis, Settings->LandscapeMaterialLayerNames[i], WeightOutImportDescriptors[i],WeightOutMessage[i]); 
     
-				TArray<uint8> WeightOutData; 
-				FLandscapeImportHelper::GetWeightmapImportData(WeightOutImportDescriptors[i], DescriptorIndex, Settings->LandscapeMaterialLayerNames[i], WeightOutData, WeightOutMessage[i]); 
+					TArray<uint8> WeightOutData; 
+					FLandscapeImportHelper::GetWeightmapImportData(WeightOutImportDescriptors[i], DescriptorIndex, Settings->LandscapeMaterialLayerNames[i], WeightOutData, WeightOutMessage[i]); 
     
-				TArray<uint8> FinalWeightOutData; 
-				FLandscapeImportHelper::TransformWeightmapImportData(WeightOutData, FinalWeightOutData, OutImportDescriptor.ImportResolutions[DescriptorIndex], FLandscapeImportResolution(SizeX, SizeY), ELandscapeImportTransformType::ExpandCentered); 
+					TArray<uint8> FinalWeightOutData; 
+					FLandscapeImportHelper::TransformWeightmapImportData(WeightOutData, FinalWeightOutData, OutImportDescriptor.ImportResolutions[DescriptorIndex], FLandscapeImportResolution(SizeX, SizeY), ELandscapeImportTransformType::ExpandCentered); 
 
-				MaterialImportLayers[i].LayerName = Settings->LandscapeMaterialLayerNames[i];
-				MaterialImportLayers[i].LayerInfo = LayerInfoObjects[i];
-				MaterialImportLayers[i].LayerData = MoveTemp(FinalWeightOutData); 
-			
+					MaterialImportLayers[i].LayerData = MoveTemp(FinalWeightOutData); 
+				
+				}
 			}
 		}
 
@@ -1253,7 +1297,7 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 	HeightmapDataPerLayers.Add(FGuid(), MoveTemp(FinalHeightData));
 	TMap<FGuid, TArray<FLandscapeImportLayerInfo>> MaterialLayerDataPerLayers;
 
-	if(Settings->LandscapeMaterialLayerNames.Num() == 0 || !PathExists || Settings->LandscapeMaterialLayerNames.Num() < 2)
+	if(MaterialImportLayers.Num() == 0)
 	{
 		MaterialLayerDataPerLayers.Add(FGuid(), TArray<FLandscapeImportLayerInfo>());
 	}
@@ -1280,22 +1324,27 @@ void UGaeaSubsystem::CreateLandscapeActor(UImporterPanelSettings* Settings)
 
 	Landscape->RegisterAllComponents();
 
-	// Fill in the LayerInfo for layers with no data.
-	const TArray< FLandscapeImportLayer >& ImportLandscapeLayersList = DefaultValueObject->ImportLandscape_Layers;
-	for(int32 i = 0; i < ImportLandscapeLayersList.Num(); i++)
+	// Import doesn't fill in the LayerInfo for layers with no data, do that now.
+	// UE4.27 has no ALandscape::AddTargetLayer(), so we attach the layer info objects the same
+	// way the stock Landscape editor does (LandscapeEditorDetailCustomization_NewLandscape.cpp).
+	// Without this the weightmap allocations are orphaned and the material layers never get applied.
+	for(int32 i = 0; i < MaterialImportLayers.Num(); i++)
 	{
-		if(ImportLandscapeLayersList[i].LayerInfo != nullptr)
+		if(MaterialImportLayers[i].LayerInfo != nullptr)
 		{
-			Landscape->EditorLayerSettings.Add(FLandscapeEditorLayerSettings(ImportLandscapeLayersList[i].LayerInfo, ImportLandscapeLayersList[i].SourceFilePath));
+			Landscape->EditorLayerSettings.Add(FLandscapeEditorLayerSettings(MaterialImportLayers[i].LayerInfo, MaterialImportLayers[i].SourceFilePath));
 
-			int32 LayerInfoIndex = LandscapeInfo->GetLayerInfoIndex(ImportLandscapeLayersList[i].LayerName);
+			int32 LayerInfoIndex = LandscapeInfo->GetLayerInfoIndex(MaterialImportLayers[i].LayerName);
 			if(ensure(LayerInfoIndex != INDEX_NONE))
 			{
 				FLandscapeInfoLayerSettings& LayerSettings = LandscapeInfo->Layers[LayerInfoIndex];
-				LayerSettings.LayerInfoObj = ImportLandscapeLayersList[i].LayerInfo;
+				LayerSettings.LayerInfoObj = MaterialImportLayers[i].LayerInfo;
 			}
 		}
 	}
+
+	// Re-run now that EditorLayerSettings is populated so the info map picks the objects up.
+	LandscapeInfo->UpdateLayerInfoMap(Landscape);
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	/// World Partition Setup
